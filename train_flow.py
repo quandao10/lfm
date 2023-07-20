@@ -8,7 +8,6 @@
 import argparse
 import torch
 import numpy as np
-# from torchdiffeq import odeint
 from torchdiffeq import odeint_adjoint as odeint
 import os
 import torch.nn as nn
@@ -22,7 +21,14 @@ from torch.multiprocessing import Process
 import torch.distributed as dist
 import shutil
 
+class Model_(nn.Module):
+    def __init__(self, model):
+        super(Model_, self).__init__()
+        self.model = model
 
+    def forward(self, t, x_0):
+        out = self.model(t, x_0)
+        return -out[:,:3,:,:] + out[:,3:,:,:]
 
 def copy_source(file, output_dir):
     shutil.copyfile(file, os.path.join(output_dir, os.path.basename(file)))
@@ -31,10 +37,18 @@ def broadcast_params(params):
     for param in params:
         dist.broadcast(param.data, src=0)
 
-def sample_from_model(model, x_0):
+def sample_from_model(model, x_0, nfes = [1, 5, 10, 25, 50, 100]):
     t = torch.tensor([1., 0.], device="cuda")
-    fake_image = odeint(model, x_0, t, atol=1e-5, rtol=1e-5)
-    return fake_image
+    model_ = Model_(model)
+    
+    fake_images = {
+    }
+    for nfe in nfes:
+        fake_image = odeint(model_, x_0, t, method="euler", options = {
+                "step_size": 1./nfe,
+            })[-1]
+        fake_images[nfe] = fake_image
+    return fake_images
 
 #%%
 def train(rank, gpu, args):
@@ -59,7 +73,7 @@ def train(rank, gpu, args):
                                                pin_memory=True,
                                                sampler=train_sampler,
                                                drop_last = True)
-    
+    args.layout = False
     model = get_flow_model(args).to(device)
     broadcast_params(model.parameters())
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas = (args.beta1, args.beta2))
@@ -106,10 +120,9 @@ def train(rank, gpu, args):
             t = torch.rand((x_1.size(0),) , device=device)
             t = t.view(-1, 1, 1, 1)
             x_0 = torch.randn_like(x_1)
-            v_t = (1 - t) * x_1 + (1e-5 + (1 - 1e-5) * t) * x_0
-            u = (1 - 1e-5) * x_0 - x_1
-            
-            loss = F.mse_loss(model(t.squeeze(), v_t), u)
+            v_t = (1 - t) * x_1 + t * x_0
+            out = model(t.squeeze(), v_t)
+            loss = F.mse_loss(out[:,:3,:,:], x_1) + F.mse_loss(out[:,3:,:,:], x_0)
             loss.backward()
             optimizer.step()
             
@@ -122,10 +135,10 @@ def train(rank, gpu, args):
             scheduler.step()
         
         if rank == 0:
-            rand = torch.randn_like(x_1)
-            fake_sample = sample_from_model(model, rand)[-1]
-            
-            torchvision.utils.save_image(fake_sample, os.path.join(exp_path, 'sample_epoch_{}.png'.format(epoch)), normalize=True)
+            rand = torch.randn_like(x_1)[:16]
+            fake_samples = sample_from_model(model, rand)
+            for nfe in fake_samples.keys():
+                torchvision.utils.save_image(fake_samples[nfe], os.path.join(exp_path, 'sample_epoch_{}_{}.png'.format(epoch, nfe)), normalize=True)
             
             if args.save_content:
                 if epoch % args.save_content_every == 0:
@@ -188,7 +201,7 @@ if __name__ == '__main__':
                             help='number of head channels')
     parser.add_argument('--attn_resolutions', nargs='+', type=int, default=(16,),
                             help='resolution of applying attention')
-    parser.add_argument('--ch_mult', nargs='+', type=int, default=(1,1,2,2,4,4),
+    parser.add_argument('--ch_mult', nargs='+', type=int, default=(1,2,2,2),
                             help='channel mult')
     parser.add_argument('--dropout', type=float, default=0.,
                             help='drop-out rate')
@@ -202,10 +215,9 @@ if __name__ == '__main__':
     #geenrator and training
     parser.add_argument('--exp', default='experiment_cifar_default', help='name of experiment')
     parser.add_argument('--dataset', default='cifar10', help='name of dataset')
-    parser.add_argument('--num_timesteps', type=int, default=200)
 
-    parser.add_argument('--batch_size', type=int, default=128, help='input batch size')
-    parser.add_argument('--num_epoch', type=int, default=1200)
+    parser.add_argument('--batch_size', type=int, default=196, help='input batch size')
+    parser.add_argument('--num_epoch', type=int, default=800)
 
     parser.add_argument('--lr', type=float, default=5e-4, help='learning rate g')
     

@@ -1,6 +1,6 @@
 # import ml_collections
 
-from models.guided_diffusion.unet import UNetModel, UNetModelAttn
+from models.guided_diffusion.unet import UNetModel, UNetModelAttn, DecomposedUNetModel
 
 
     
@@ -32,7 +32,7 @@ def get_flow_model(config):
                         legacy=True,
                     )
     else:
-        model = UNetModel(image_size=config.image_size//8,
+        model = DecomposedUNetModel(image_size=config.image_size//8,
                         in_channels=config.num_in_channels,
                         model_channels=config.nf,
                         out_channels=config.num_out_channels,

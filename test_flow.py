@@ -8,6 +8,7 @@ import argparse
 import torch
 import os
 import numpy as np
+import torch.nn as nn
 from torchdiffeq import odeint_adjoint as odeint
 from models.util import get_flow_model
 import torchvision
@@ -16,6 +17,16 @@ from pytorch_fid.fid_score import calculate_fid_given_paths
 
 ADAPTIVE_SOLVER = ["dopri5", "dopri8", "adaptive_heun", "bosh3"]
 FIXER_SOLVER = ["euler", "rk4", "midpoint"]
+
+
+class Model_(nn.Module):
+    def __init__(self, model):
+        super(Model_, self).__init__()
+        self.model = model
+
+    def forward(self, t, x_0):
+        out = self.model(t, x_0)
+        return -out[:,:3,:,:] + out[:,3:,:,:]
 
 def sample_from_model(model, x_0, args):
     if args.method in ADAPTIVE_SOLVER:
@@ -29,8 +40,9 @@ def sample_from_model(model, x_0, args):
         }
     if not args.compute_fid:
         model.count_nfe = True
+    model_ = Model_(model)
     t = torch.tensor([1., 0.], device="cuda")
-    fake_image = odeint(model, 
+    fake_image = odeint(model_, 
                         x_0, 
                         t, 
                         method=args.method, 
@@ -59,7 +71,7 @@ def sample_and_test(args):
     
     to_range_0_1 = lambda x: (x + 1.) / 2.
 
-    
+    args.layout = False
     model =  get_flow_model(args).to(device)
     ckpt = torch.load('./saved_info/flow_matching/{}/{}/model_{}.pth'.format(args.dataset, args.exp, args.epoch_id), map_location=device)
     print("Finish loading model")
@@ -93,7 +105,7 @@ def sample_and_test(args):
         fid = calculate_fid_given_paths(paths=paths, **kwargs)
         print('FID = {}'.format(fid))
     else:
-        x_0 = torch.randn(args.batch_size, 3,args.image_size, args.image_size).to(device)
+        x_0 = torch.randn(args.batch_size, 3, args.image_size, args.image_size).to(device)
         fake_sample = sample_from_model(model, x_0, args)[-1]
         fake_sample = to_range_0_1(fake_sample)
         print("NFE: {}".format(model.nfe))

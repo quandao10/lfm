@@ -1,6 +1,7 @@
 import torch
 import torchvision.transforms as transforms
 from torchvision.datasets import CIFAR10
+import torchtoolbox
 from datasets_prep.lsun import LSUN
 from datasets_prep.stackmnist_data import StackedMNIST, _data_transforms_stacked_mnist
 from datasets_prep.lmdb_datasets import LMDBDataset
@@ -8,7 +9,7 @@ from datasets_prep.inpainting_dataset import InpaintingTrainDataset
 
 def get_dataset(args):
     if args.dataset == 'cifar10':
-        dataset = CIFAR10('./dataset', train=True, transform=transforms.Compose([
+        dataset = CIFAR10('./dataset/', train=True, transform=transforms.Compose([
                         transforms.Resize(32),
                         transforms.RandomHorizontalFlip(),
                         transforms.ToTensor(),
