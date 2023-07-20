@@ -11,13 +11,11 @@ import numpy as np
 import torch.nn as nn
 from torchdiffeq import odeint_adjoint as odeint
 from models.util import get_flow_model
-from datasets_prep.coco import CocoImagesAndCaptionsTrain, CocoImagesAndCaptionsValidation
-from datasets_prep.ade20k import ADE20kTrain, ADE20kValidation
-from datasets_prep.celeb_mask import CelebAMaskTrain, CelebAMaskValidation
+from datasets_prep.annotated_object_coco import COCOTrain, COCOValidation
 import torchvision
 from pytorch_fid.fid_score import calculate_fid_given_paths
 from diffusers.models import AutoencoderKL
-from models.encoder import SpatialRescaler
+from models.encoder import BERTEmbedder
 
 ADAPTIVE_SOLVER = ["dopri5", "dopri8", "adaptive_heun", "bosh3"]
 FIXER_SOLVER = ["euler", "rk4", "midpoint"]
@@ -30,6 +28,17 @@ def to_rgb(x):
     x = 2. * (x - x.min()) / (x.max() - x.min()) - 1.
     return x
 
+def plot_coord(train_dataset, batch, args, epoch):
+    bbox_imgs = []
+    map_fn = lambda catno: train_dataset.get_textual_label_for_category_id(train_dataset.get_category_id(catno))
+    for tknzd_bbox in batch:
+        bboximg = train_dataset.conditional_builders["objects_bbox"].plot(tknzd_bbox.detach().cpu(), map_fn, (256, 256))
+        bbox_imgs.append(bboximg)
+
+    cond_img = torch.stack(bbox_imgs, dim=0)
+    torchvision.utils.save_image(cond_img, os.path.join("./layout_gt", '{}_coord.png'.format(epoch)), normalize=True)
+
+
 def sample_from_model(model, x_0, args):
     if args.method in ADAPTIVE_SOLVER:
         options = {
@@ -40,8 +49,7 @@ def sample_from_model(model, x_0, args):
             "step_size": args.step_size,
             "perturb": args.perturb
         }
-    if not args.compute_fid:
-        model.count_nfe = True
+    
     t = torch.tensor([1., 0.], device="cuda")
     fake_image = odeint(model, 
                         x_0, 
@@ -56,6 +64,17 @@ def sample_from_model(model, x_0, args):
                         )
     return fake_image
 
+def get_weight(model):
+    param_size = 0
+    for param in model.parameters():
+        param_size += param.nelement() * param.element_size()
+    buffer_size = 0
+    for buffer in model.buffers():
+        buffer_size += buffer.nelement() * buffer.element_size()
+
+    size_all_mb = (param_size + buffer_size) / 1024**2
+    return size_all_mb
+
 class WrapperCondFlow(nn.Module):
     def __init__(self, model, cond):
         super().__init__()
@@ -63,66 +82,60 @@ class WrapperCondFlow(nn.Module):
         self.cond = cond
     
     def forward(self, t, x):
-        x = torch.cat([x, self.cond], 1)
-        return self.model(t, x)
+        return self.model(t, x, context=self.cond)
 
 
 def sample_and_test(args):
     torch.manual_seed(1000)
     device = 'cuda:0'
     
-    if args.dataset == "coco":
-        dataset = CocoImagesAndCaptionsValidation(size=256, onehot_segmentation=True, use_stuffthing=True)
-        num_cls = 182
-    elif args.dataset == "ade20k":
-        dataset = ADE20kValidation(size=256, crop_size=256, random_crop=False)
-        num_cls = 151
-    elif args.dataset == "celeba":
-        dataset = CelebAMaskValidation(size=256, crop_size=256)
-        num_cls = 19
+    dataset = COCOValidation(size=256)
         
     dataloader = torch.utils.data.DataLoader(dataset,
                                             batch_size=args.batch_size,
                                             shuffle=False,
                                             num_workers=4,
                                             pin_memory=True)
-    args.layout = False
+    args.layout = True
     to_range_0_1 = lambda x: (x + 1.) / 2.
 
-    cond_stage_model = SpatialRescaler(n_stages=3, in_channels=num_cls, out_channels=4, multiplier=0.5).to(device)
-    cond_ckpt = torch.load('./saved_info/latent_flow_mask2image/{}/{}/cond_stage_model_{}.pth'.format(args.dataset, args.exp, args.epoch_id), map_location=device)
+    cond_stage_model = BERTEmbedder(n_embed=512,
+                                    n_layer=16,
+                                    vocab_size=8192,
+                                    max_seq_len=92,
+                                    use_tokenizer=False).to(device)
+    cond_ckpt = torch.load('./saved_info/latent_flow_layout2image/{}/{}/cond_stage_model_{}.pth'.format(args.dataset, args.exp, args.epoch_id), map_location=device)
     for key in list(cond_ckpt.keys()):
         cond_ckpt[key[7:]] = cond_ckpt.pop(key)
     cond_stage_model.load_state_dict(cond_ckpt)
     cond_stage_model.eval()
+    print("Finish loading cond stage model")
     
     model =  get_flow_model(args).to(device)
-    first_stage_model = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
-    ckpt = torch.load('./saved_info/latent_flow_mask2image/{}/{}/model_{}.pth'.format(args.dataset, args.exp, args.epoch_id), map_location=device)
+    ckpt = torch.load('./saved_info/latent_flow_layout2image/{}/{}/model_{}.pth'.format(args.dataset, args.exp, args.epoch_id), map_location=device)
     #loading weights from ddp in single gpu
     for key in list(ckpt.keys()):
         ckpt[key[7:]] = ckpt.pop(key)
     model.load_state_dict(ckpt)
     model.eval()
     print("Finish loading model")
+    
+    first_stage_model = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
 
     del ckpt
-            
-    save_dir = "./mask2image_generated_samples/{}".format(args.dataset)
-    # os.makedirs("./testimage_generated_samples/{}".format(args.dataset))
-    
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
     
     model_cond = WrapperCondFlow(model, cond=None)
-    
+    os.makedirs("./layout_gen", exist_ok=True)
+    os.makedirs("./layout_gt", exist_ok=True)
     # if args.compute_fid:
-    for i , (image, segmentation) in enumerate(dataloader):
-        segmentation = torch.nn.functional.one_hot(segmentation, num_cls).permute(0, 3, 1, 2)
-        seg = segmentation.to(device, non_blocking=True).float()
+    for i , batch in enumerate(dataloader):
+        image = batch["image"].permute(0, 3, 1, 2)
+        coords = batch["objects_bbox"].to(device, non_blocking=True)
+        x_1 = image.to(device, non_blocking=True)
         with torch.no_grad():
             with torch.no_grad():
-                c = cond_stage_model(seg)
+                z_1 = first_stage_model.encode(x_1).latent_dist.sample().mul_(args.scale_factor)
+                c = cond_stage_model(coords)
             model_cond.cond = c
             z_0 = torch.randn(image.size(0), 4, args.image_size//8, args.image_size//8).to(device)
             fake_sample = sample_from_model(model_cond, z_0, args)[-1]
@@ -130,28 +143,21 @@ def sample_and_test(args):
             fake_image = to_range_0_1(fake_image)
             for j, x in enumerate(fake_image):
                 index = i * image.size(0) + j 
-                torchvision.utils.save_image(x, './mask2image_generated_samples/{}/{}.jpg'.format(args.dataset, index), normalized=True)
-                # torchvision.utils.save_image(to_rgb(seg[j]), './mask2image_generated_samples/{}/mask_{}.jpg'.format(args.dataset, index))
-                # torchvision.utils.save_image(image[j], './testimage_generated_samples/{}/gt_{}.jpg'.format(args.dataset, index))
+                plot_coord(train_dataset=dataset, batch=coords[j:j+1], args=args, epoch=index)
+                torchvision.utils.save_image(fake_image[j], os.path.join("./layout_gen", 'gen_{}.png'.format(index)), normalize=True)
+                torchvision.utils.save_image(image[j], os.path.join("./layout_gt", 'gt_{}.png'.format(index)), normalize=True)
             print('generating batch ', i)
         
-        
-
-    
-    
-            
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('ddgan parameters')
     parser.add_argument('--seed', type=int, default=1024,
                         help='seed used for initialization')
-    parser.add_argument('--compute_fid', action='store_true', default=False,
-                            help='whether or not compute FID')
-    parser.add_argument('--epoch_id', type=int,default=425)
+    parser.add_argument('--epoch_id', type=int,default=675)
 
     parser.add_argument('--image_size', type=int, default=256,
                             help='size of image')
-    parser.add_argument('--num_in_channels', type=int, default=8,
+    parser.add_argument('--num_in_channels', type=int, default=4,
                             help='in channel image')
     parser.add_argument('--num_out_channels', type=int, default=4,
                             help='in channel image')
@@ -167,9 +173,9 @@ if __name__ == '__main__':
                             help='number of head')
     parser.add_argument('--num_head_upsample', type=int, default=-1,
                             help='number of head upsample')
-    parser.add_argument('--num_head_channels', type=int, default=-1,
+    parser.add_argument('--num_head_channels', type=int, default=32,
                             help='number of head channels')
-    parser.add_argument('--attn_resolutions', nargs='+', type=int, default=(8,4),
+    parser.add_argument('--attn_resolutions', nargs='+', type=int, default=(16,8,4),
                             help='resolution of applying attention')
     parser.add_argument('--ch_mult', nargs='+', type=int, default=(1,2,3,4),
                             help='channel mult')
@@ -184,11 +190,9 @@ if __name__ == '__main__':
                             help='size of image')
     
     #######################################
-    parser.add_argument('--exp', default='experiment_cifar_default', help='name of experiment')
-    parser.add_argument('--real_img_dir', default='./pytorch_fid/cifar10_train_stat.npy', help='directory to real images for FID computation')
-    parser.add_argument('--dataset', default='cifar10', help='name of dataset')
-    parser.add_argument('--num_timesteps', type=int, default=200)
-    parser.add_argument('--batch_size', type=int, default=200, help='sample generating batch size')
+    parser.add_argument('--exp', default='exp_1', help='name of experiment')
+    parser.add_argument('--dataset', default='coco', help='name of dataset')
+    parser.add_argument('--batch_size', type=int, default=64, help='sample generating batch size')
     
     # sampling argument
     parser.add_argument('--atol', type=float, default=1e-5, help='absolute tolerance error')

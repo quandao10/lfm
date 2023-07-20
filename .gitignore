@@ -13,3 +13,5 @@ logs/
 stabilityai/
 *generated*
 celeba_test/
+fid_dataset/
+layout/

@@ -282,7 +282,6 @@ if __name__ == '__main__':
     #geenrator and training
     parser.add_argument('--exp', default='experiment_cifar_default', help='name of experiment')
     parser.add_argument('--dataset', default='coco', help='name of dataset')
-    parser.add_argument('--num_timesteps', type=int, default=200)
 
     parser.add_argument('--batch_size', type=int, default=32, help='input batch size')
     parser.add_argument('--num_epoch', type=int, default=500)
