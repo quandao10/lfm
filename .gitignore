@@ -13,7 +13,8 @@ logs/
 stabilityai/
 *generated*
 celeba_test/
-fid_dataset/
-gt_celeb/
-mask_celeb/
-history/
+*.png
+*.jpg
+*.log
+data/
+slurm_scripts/
