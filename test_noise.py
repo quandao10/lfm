@@ -33,7 +33,7 @@ class Model_(nn.Module):
 
     # x1*t + x0*(1-t) = xt
 
-def sample_from_model(model, x_1, args):
+def sample_from_noise(model, x_1, args):
     if args.method in ADAPTIVE_SOLVER:
         options = {
             "dtype": torch.float64,
@@ -101,7 +101,7 @@ def sample_and_test(args):
             break
         image = image.to(device)
         with torch.no_grad():
-            noise = sample_from_model(model, image, args)[-1]
+            noise = sample_from_noise(model, image, args)[-1]
             for j, x in enumerate(noise):
                 index = i * args.batch_size + j 
                 saved.append(torch.mean(x).item())
