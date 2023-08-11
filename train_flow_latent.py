@@ -17,7 +17,6 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 from torchdiffeq import odeint_adjoint as odeint
->>>>>>> origin/hao_dev
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim

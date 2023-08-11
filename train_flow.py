@@ -122,11 +122,10 @@ def train(rank, gpu, args):
             x_0 = torch.randn_like(x_1)
             v_t = (1 - t) * x_1 + t * x_0
             out = model(t.squeeze(), v_t)
-            loss = F.mse_loss(out[:,:3,:,:], x_1) + F.mse_loss(out[:,3:,:,:], x_0)
+            loss = F.mse_loss(out[:,:3,:,:], x_1) + F.mse_loss(out[:,3:,:,:], x_0) + F.mse_loss(out[:,3:,:,:]-out[:,:3,:,:], x_0-x_1)
             loss.backward()
             optimizer.step()
             
-            global_step += 1
             if iteration % 100 == 0:
                 if rank == 0:
                     print('epoch {} iteration{}, Loss: {}'.format(epoch,iteration, loss.item()))
@@ -143,7 +142,7 @@ def train(rank, gpu, args):
             if args.save_content:
                 if epoch % args.save_content_every == 0:
                     print('Saving content.')
-                    content = {'epoch': epoch + 1, 'global_step': global_step, 'args': args,
+                    content = {'epoch': epoch + 1, 'args': args,
                                'model_dict': model.state_dict(), 'optimizer': optimizer.state_dict(),
                                'scheduler': scheduler.state_dict()}
                     

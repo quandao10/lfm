@@ -16,7 +16,19 @@ from pytorch_fid.fid_score import calculate_fid_given_paths
 
 
 ADAPTIVE_SOLVER = ["dopri5", "dopri8", "adaptive_heun", "bosh3"]
-FIXER_SOLVER = ["euler", "rk4", "midpoint"]
+FIXER_SOLVER = ["euler", "rk4", "midpoint", "heun"]
+
+
+def heun(model, noise, dt):
+    N = int(1/dt)
+    x_t = noise
+    for i in range(N):
+        v_t = model(torch.tensor((N-i)/N), x_t)
+        x_tp1 = x_t - v_t * dt
+        v_tp1 = model(torch.tensor((N-(i+1))/N), x_tp1)
+        v_t = 1/2 * (v_tp1 + v_t)
+        x_t = x_t - v_t * dt
+    return (noise, x_t)
 
 
 class Model_(nn.Module):
@@ -42,17 +54,20 @@ def sample_from_model(model, x_0, args):
         model.count_nfe = True
     model_ = Model_(model)
     t = torch.tensor([1., 0.], device="cuda")
-    fake_image = odeint(model_, 
-                        x_0, 
-                        t, 
-                        method=args.method, 
-                        atol = args.atol, 
-                        rtol = args.rtol,
-                        adjoint_method=args.method,
-                        adjoint_atol= args.atol,
-                        adjoint_rtol= args.rtol,
-                        options=options
-                        )
+    if args.method == "heun":
+        fake_image = heun(model_, x_0, args.step_size)
+    else:
+        fake_image = odeint(model_, 
+                            x_0, 
+                            t, 
+                            method=args.method, 
+                            atol = args.atol, 
+                            rtol = args.rtol,
+                            adjoint_method=args.method,
+                            adjoint_atol= args.atol,
+                            adjoint_rtol= args.rtol,
+                            options=options
+                            )
     return fake_image
 
 
@@ -164,7 +179,7 @@ if __name__ == '__main__':
     # sampling argument
     parser.add_argument('--atol', type=float, default=1e-5, help='absolute tolerance error')
     parser.add_argument('--rtol', type=float, default=1e-5, help='absolute tolerance error')
-    parser.add_argument('--method', type=str, default='dopri5', help='solver_method', choices=["dopri5", "dopri8", "adaptive_heun", "bosh3", "euler", "midpoint", "rk4"])
+    parser.add_argument('--method', type=str, default='dopri5', help='solver_method', choices=["dopri5", "dopri8", "adaptive_heun", "bosh3", "euler", "midpoint", "rk4", "heun"])
     parser.add_argument('--step_size', type=float, default=0.01, help='step_size')
     parser.add_argument('--perturb', action='store_true', default=False)
         

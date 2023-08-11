@@ -18,3 +18,4 @@ celeba_test/
 *.log
 data/
 slurm_scripts/
+history/
