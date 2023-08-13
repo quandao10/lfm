@@ -43,8 +43,8 @@ def sample_from_noise(model, x_1, args):
             "step_size": args.step_size,
             "perturb": args.perturb
         }
-    if not args.compute_fid:
-        model.count_nfe = True
+    # if not args.compute_fid:
+    #     model.count_nfe = True
     model_ = Model_(model)
     t = torch.tensor([0., 1.], device="cuda") ##
     noise = odeint(model_, 
@@ -88,13 +88,10 @@ def sample_and_test(args):
     dataset = get_dataset(args)
     data_loader = torch.utils.data.DataLoader(dataset,
                                                batch_size=args.batch_size,
-                                               shuffle=False,
                                                num_workers=4,
-                                               pin_memory=True,
-                                               drop_last = True)
+                                               pin_memory=True)
+    
 
-    saved = []
-    saved2 = []
     for i, (image, _) in enumerate(data_loader):
         clock = time.time()
         if i >= iters_needed:
@@ -182,10 +179,7 @@ if __name__ == '__main__':
     parser.add_argument('--method', type=str, default='euler', help='solver_method', choices=["dopri5", "dopri8", "adaptive_heun", "bosh3", "euler", "midpoint", "rk4"])
     parser.add_argument('--step_size', type=float, default=0.01, help='step_size')
     parser.add_argument('--perturb', action='store_true', default=False)
-        
-
-
-
+    
    
     args = parser.parse_args()
     

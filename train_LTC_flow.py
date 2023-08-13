@@ -23,6 +23,7 @@ import shutil
 from glob import glob
 
 from test_noise import sample_from_noise
+from tqdm import tqdm
 
 class Model_(nn.Module):
     def __init__(self, model):
@@ -30,8 +31,7 @@ class Model_(nn.Module):
         self.model = model
 
     def forward(self, t, x_0):
-        out = self.model(t, x_0)
-        return -out[:,:3,:,:] + out[:,3:,:,:]
+        return self.model(t, x_0)
 
 def copy_source(file, output_dir):
     shutil.copyfile(file, os.path.join(output_dir, os.path.basename(file)))
@@ -53,16 +53,11 @@ def sample_from_model(model, x_0, nfes = [1, 5, 10, 25, 50, 100]):
         fake_images[nfe] = fake_image
     return fake_images
 
-def create_coupling_dataset(args):
-    torch.manual_seed(24)
-    device = 'cuda:0'
-
-    
+def create_coupling_dataset(args, rank, gpu, device):
     to_range_0_1 = lambda x: (x + 1.) / 2.
 
-    args.layout = False
     model =  get_flow_model(args).to(device)
-    ckpt = torch.load(arg.coupling_model, map_location=device)
+    ckpt = torch.load(args.coupling_model, map_location=device)
     print("Finish loading model")
     #loading weights from ddp in single gpu
     for key in list(ckpt.keys()):
@@ -76,28 +71,33 @@ def create_coupling_dataset(args):
         os.makedirs(save_dir)
     
     dataset = get_dataset(args)
+    train_sampler = torch.utils.data.distributed.DistributedSampler(dataset,
+                                                                    num_replicas=args.world_size,
+                                                                    rank=rank)
     data_loader = torch.utils.data.DataLoader(dataset,
                                                batch_size=args.batch_size,
                                                shuffle=False,
                                                num_workers=4,
                                                pin_memory=True,
+                                               sampler=train_sampler,
                                                drop_last = True)
-
-    for i, (image, _) in enumerate(data_loader):
+    
+    model = nn.parallel.DistributedDataParallel(model, device_ids=[gpu],find_unused_parameters=True)
+    global_iter = 0
+    for i, (image, _) in enumerate(tqdm(data_loader)):
         image = image.to(device)
         with torch.no_grad():
             noise = sample_from_noise(model, image, args)[-1]
             for j, (x0, x1) in enumerate(zip(image, noise)):
-                index = i * args.batch_size + j
-                x0 = x0.to("cpu").to_numpy()
-                x1 = x1.to("cpu").to_numpy()
+                index = (i * args.batch_size + j)*args.num_process_per_node + rank
+                x0 = x0.to("cpu").numpy()
+                x1 = x1.to("cpu").numpy()
                 np.save(os.path.join(save_dir, "image_{}.npy".format(index)), x0)
                 np.save(os.path.join(save_dir, "noise_{}.npy".format(index)), x1)
-                torchvision.utils.save_image(x0, './generated_couplings/{}/seed_{}/image_{}.'.format(args.dataset, index))
             print('generating batch ', i)
     return save_dir
 
-class CouplingDataset(torch.data.Dataset):
+class CouplingDataset(torch.utils.data.Dataset):
     def __init__(self, root, transform=None):
         self.train = train
         self.root = root
@@ -108,8 +108,8 @@ class CouplingDataset(torch.data.Dataset):
 
 
     def __getitem__(self, index):
-        image = np.load(os.path.join(self.root, "image_{}.npy".format(index))).item()
-        noise = np.load(os.path.join(self.root, "noise_{}.npy".format(index))).item()
+        image = np.load(os.path.join(self.root, "image_{}.npy".format(index)))
+        noise = np.load(os.path.join(self.root, "noise_{}.npy".format(index)))
         image = torch.from_numpy(image)
         noise = torch.from_numpy(noise)
 
@@ -123,19 +123,20 @@ class CouplingDataset(torch.data.Dataset):
 
 
 
-#%%
+
 def train(rank, gpu, args):
     
     from EMA import EMA
-    
+        
     torch.manual_seed(args.seed + rank)
     torch.cuda.manual_seed(args.seed + rank)
     torch.cuda.manual_seed_all(args.seed + rank)
     device = torch.device('cuda:{}'.format(gpu))
     
+    
     batch_size = args.batch_size
     
-    root = create_coupling_dataset(args) if args.root is None else args.root
+    root = create_coupling_dataset(args, rank, gpu, device) if args.coupling_dir is None else args.coupling_dir
     dataset = CouplingDataset(root)
     if args.keep_training == False: return
 
@@ -183,7 +184,14 @@ def train(rank, gpu, args):
         print("=> loaded checkpoint (epoch {})"
                   .format(checkpoint['epoch']))
     else:
-        global_step, epoch, init_epoch = 0, 0, 0
+        ckpt = torch.load(args.coupling_model, map_location=device)
+        print("Finish loading model")
+        #loading weights from ddp in single gpu
+        # for key in list(ckpt.keys()):
+        #     ckpt[key[7:]] = ckpt.pop(key)
+        model.load_state_dict(ckpt)
+        epoch, init_epoch = 0, 0
+        del ckpt
     
     
     for epoch in range(init_epoch, args.num_epoch+1):
@@ -191,12 +199,13 @@ def train(rank, gpu, args):
        
         for iteration, (x_1, x_0) in enumerate(data_loader):
             x_1 = x_1.to(device, non_blocking=True)
+            noise = torch.randn_like(x_1)
+            x_1 = x_1 + args.perturb_rate*noise
             x_0 = x_0.to(device, non_blocking=True)
             model.zero_grad()
             #sample t
             t = torch.rand((x_1.size(0),) , device=device)
             t = t.view(-1, 1, 1, 1)
-            # x_0 = torch.randn_like(x_1)
             v_t = t * x_1 + (1-t) * x_0
             out = model(t.squeeze(), v_t)
             u = x_1 - x_0
@@ -204,7 +213,6 @@ def train(rank, gpu, args):
             loss.backward()
             optimizer.step()
             
-            global_step += 1
             if iteration % 100 == 0:
                 if rank == 0:
                     print('epoch {} iteration{}, Loss: {}'.format(epoch,iteration, loss.item()))
@@ -221,7 +229,7 @@ def train(rank, gpu, args):
             if args.save_content:
                 if epoch % args.save_content_every == 0:
                     print('Saving content.')
-                    content = {'epoch': epoch + 1, 'global_step': global_step, 'args': args,
+                    content = {'epoch': epoch + 1, 'args': args,
                                'model_dict': model.state_dict(), 'optimizer': optimizer.state_dict(),
                                'scheduler': scheduler.state_dict()}
                     
@@ -253,7 +261,7 @@ def cleanup():
 #%%
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('ddgan parameters')
-    parser.add_argument('--seed', type=int, default=1024,
+    parser.add_argument('--seed', type=int, default=25,
                         help='seed used for initialization')
     
     parser.add_argument('--resume', action='store_true',default=False)
@@ -294,7 +302,7 @@ if __name__ == '__main__':
     parser.add_argument('--exp', default='experiment_cifar_default', help='name of experiment')
     parser.add_argument('--dataset', default='cifar10', help='name of dataset')
 
-    parser.add_argument('--batch_size', type=int, default=196, help='input batch size')
+    parser.add_argument('--batch_size', type=int, default=250, help='input batch size')
     parser.add_argument('--num_epoch', type=int, default=800)
 
     parser.add_argument('--lr', type=float, default=5e-4, help='learning rate g')
@@ -308,10 +316,11 @@ if __name__ == '__main__':
     parser.add_argument('--use_ema', action='store_true', default=False,
                             help='use EMA or not')
     parser.add_argument('--ema_decay', type=float, default=0.9999, help='decay rate for EMA')
+    parser.add_argument('--perturb_rate', type=float, default=0.2, help='decay rate for EMA')
     
 
     parser.add_argument('--save_content', action='store_true',default=False)
-    parser.add_argument('--save_content_every', type=int, default=50, help='save content for resuming every x epochs')
+    parser.add_argument('--save_content_every', type=int, default=10, help='save content for resuming every x epochs')
     parser.add_argument('--save_ckpt_every', type=int, default=25, help='save ckpt every x epochs')
    
     ###ddp
@@ -333,6 +342,14 @@ if __name__ == '__main__':
                         help='Coupling model to generate the couplings')
     parser.add_argument('--keep_training', type=bool, default=True,
                         help='Option wheather to train a model based on generated coupling dataset')
+    
+    # sampling argument
+    parser.add_argument('--atol', type=float, default=1e-5, help='absolute tolerance error')
+    parser.add_argument('--rtol', type=float, default=1e-5, help='absolute tolerance error')
+    parser.add_argument('--method', type=str, default='euler', help='solver_method', choices=["dopri5", "dopri8", "adaptive_heun", "bosh3", "euler", "midpoint", "rk4"])
+    parser.add_argument('--step_size', type=float, default=0.01, help='step_size')
+    parser.add_argument('--perturb', action='store_true', default=False)
+        
 
    
     args = parser.parse_args()
