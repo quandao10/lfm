@@ -13,5 +13,10 @@ logs/
 stabilityai/
 *generated*
 celeba_test/
-fid_dataset/
-layout/
+*.png
+*.jpg
+*.log
+data/
+slurm_scripts/
+history/
+precomputed/

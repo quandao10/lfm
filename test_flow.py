@@ -8,6 +8,7 @@ import argparse
 import torch
 import os
 import numpy as np
+import torch.nn as nn
 from torchdiffeq import odeint_adjoint as odeint
 from models.util import get_flow_model
 import torchvision
@@ -15,7 +16,29 @@ from pytorch_fid.fid_score import calculate_fid_given_paths
 
 
 ADAPTIVE_SOLVER = ["dopri5", "dopri8", "adaptive_heun", "bosh3"]
-FIXER_SOLVER = ["euler", "rk4", "midpoint"]
+FIXER_SOLVER = ["euler", "rk4", "midpoint", "heun"]
+
+
+def heun(model, noise, dt):
+    N = int(1/dt)
+    x_t = noise
+    for i in range(N):
+        v_t = model(torch.tensor((N-i)/N), x_t)
+        x_tp1 = x_t - v_t * dt
+        v_tp1 = model(torch.tensor((N-(i+1))/N), x_tp1)
+        v_t = 1/2 * (v_tp1 + v_t)
+        x_t = x_t - v_t * dt
+    return (noise, x_t)
+
+
+class Model_(nn.Module):
+    def __init__(self, model):
+        super(Model_, self).__init__()
+        self.model = model
+
+    def forward(self, t, x_0):
+        out = self.model(t, x_0)
+        return -out[:,:3,:,:] + out[:,3:,:,:]
 
 def sample_from_model(model, x_0, args):
     if args.method in ADAPTIVE_SOLVER:
@@ -29,18 +52,22 @@ def sample_from_model(model, x_0, args):
         }
     if not args.compute_fid:
         model.count_nfe = True
+    model_ = Model_(model)
     t = torch.tensor([1., 0.], device="cuda")
-    fake_image = odeint(model, 
-                        x_0, 
-                        t, 
-                        method=args.method, 
-                        atol = args.atol, 
-                        rtol = args.rtol,
-                        adjoint_method=args.method,
-                        adjoint_atol= args.atol,
-                        adjoint_rtol= args.rtol,
-                        options=options
-                        )
+    if args.method == "heun":
+        fake_image = heun(model_, x_0, args.step_size)
+    else:
+        fake_image = odeint(model_, 
+                            x_0, 
+                            t, 
+                            method=args.method, 
+                            atol = args.atol, 
+                            rtol = args.rtol,
+                            adjoint_method=args.method,
+                            adjoint_atol= args.atol,
+                            adjoint_rtol= args.rtol,
+                            options=options
+                            )
     return fake_image
 
 
@@ -59,7 +86,7 @@ def sample_and_test(args):
     
     to_range_0_1 = lambda x: (x + 1.) / 2.
 
-    
+    args.layout = False
     model =  get_flow_model(args).to(device)
     ckpt = torch.load('./saved_info/flow_matching/{}/{}/model_{}.pth'.format(args.dataset, args.exp, args.epoch_id), map_location=device)
     print("Finish loading model")
@@ -93,7 +120,7 @@ def sample_and_test(args):
         fid = calculate_fid_given_paths(paths=paths, **kwargs)
         print('FID = {}'.format(fid))
     else:
-        x_0 = torch.randn(args.batch_size, 3,args.image_size, args.image_size).to(device)
+        x_0 = torch.randn(args.batch_size, 3, args.image_size, args.image_size).to(device)
         fake_sample = sample_from_model(model, x_0, args)[-1]
         fake_sample = to_range_0_1(fake_sample)
         print("NFE: {}".format(model.nfe))
@@ -152,7 +179,7 @@ if __name__ == '__main__':
     # sampling argument
     parser.add_argument('--atol', type=float, default=1e-5, help='absolute tolerance error')
     parser.add_argument('--rtol', type=float, default=1e-5, help='absolute tolerance error')
-    parser.add_argument('--method', type=str, default='dopri5', help='solver_method', choices=["dopri5", "dopri8", "adaptive_heun", "bosh3", "euler", "midpoint", "rk4"])
+    parser.add_argument('--method', type=str, default='dopri5', help='solver_method', choices=["dopri5", "dopri8", "adaptive_heun", "bosh3", "euler", "midpoint", "rk4", "heun"])
     parser.add_argument('--step_size', type=float, default=0.01, help='step_size')
     parser.add_argument('--perturb', action='store_true', default=False)
         
