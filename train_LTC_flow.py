@@ -16,12 +16,10 @@ import torch.optim as optim
 import torchvision
 from datasets_prep import get_dataset
 from models.util import get_flow_model
-
 from torch.multiprocessing import Process
 import torch.distributed as dist
 import shutil
 from glob import glob
-
 from test_noise import sample_from_noise
 from tqdm import tqdm
 
@@ -150,7 +148,7 @@ def train(rank, gpu, args):
                                                pin_memory=True,
                                                sampler=train_sampler,
                                                drop_last = True)
-    args.layout = False
+    args.perturb_rate = torch.tensor(args.perturb_rate, device=device)
     model = get_flow_model(args).to(device)
     broadcast_params(model.parameters())
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas = (args.beta1, args.beta2))
@@ -161,7 +159,7 @@ def train(rank, gpu, args):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.num_epoch, eta_min=1e-5)
     
     #ddp
-    model = nn.parallel.DistributedDataParallel(model, device_ids=[gpu],find_unused_parameters=True)
+    model = nn.parallel.DistributedDataParallel(model, device_ids=[gpu], find_unused_parameters=False)
 
     exp = args.exp
     parent_dir = "./saved_info/flow_matching/{}".format(args.dataset)
@@ -200,7 +198,7 @@ def train(rank, gpu, args):
         for iteration, (x_1, x_0) in enumerate(data_loader):
             x_1 = x_1.to(device, non_blocking=True)
             noise = torch.randn_like(x_1)
-            x_1 = x_1 + args.perturb_rate*noise
+            x_1 = torch.sqrt(1-args.perturb_rate)*x_1 + torch.sqrt(args.perturb_rate)*noise
             x_0 = x_0.to(device, non_blocking=True)
             model.zero_grad()
             #sample t
