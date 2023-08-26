@@ -12,7 +12,7 @@ import torch
 import torch.distributed as dist
 from models import create_network
 from sampler.random_util import get_generator
-from test_flow_latent import FIXER_SOLVER, sample_from_model
+from test_flow_dpp import FIXER_SOLVER, sample_from_model
 from tqdm import tqdm
 import numpy as np
 

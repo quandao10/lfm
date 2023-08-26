@@ -32,19 +32,30 @@ def heun(model, noise, dt):
         x_t = x_t - v_t * dt
     return (noise, x_t)
 
-def euler_curvature(model, noise, dt, curvature):
-    N = int(1/dt)
-    M = noise.shape[0]
+def euler(model, nested_model, noise, args):
+    step_noise = (1 - args.t_noise)/args.nfe_noise
+    step_data = args.t_data/args.nfe_data
+    step_middle = 1/args.nfe_middle
     x_t = noise
-    v_temp = None
-    for i in range(N):
-        v_t = model(torch.tensor((N-i)/N), x_t)
-        x_t = x_t - v_t * dt
-        if v_temp != None:
-            # sub = (v_t-v_temp).reshape(noise.shape[0], -1)
-            # curvature[i-1] += torch.mean(torch.norm(sub, dim=1, p=2)).to("cpu")
-            curvature[i-1] = 1 - torch.mean(F.cosine_similarity(v_t.reshape(M, -1), v_temp.reshape(M, -1), dim=1)).to("cpu")
-        v_temp = v_t
+    t_noise = 1.0
+    
+    for _ in range(args.nfe_noise):
+        v_t = model(torch.tensor(t_noise), x_t)
+        x_t = x_t - v_t * step_noise
+        t_noise = t_noise - step_noise
+    
+    t_middle = 1.0
+    for _ in range(args.nfe_middle):
+        v_t = nested_model(torch.tensor(t_middle), x_t)
+        x_t = x_t - v_t * step_middle
+        t_middle = t_middle - step_middle
+    
+    t_data = args.t_data
+    for _ in range(args.nfe_data):
+        v_t = model(torch.tensor(t_data), x_t)
+        x_t = x_t - v_t * step_data
+        t_data = t_data - step_data
+        
     return (noise, x_t)
 
 
@@ -55,10 +66,9 @@ class Model_(nn.Module):
 
     def forward(self, t, x_0):
         out = self.model(t, x_0)
-        # return -out[:,:3,:,:] + out[:,3:,:,:]
         return out
     
-def sample_from_model(model, x_0, args, reverse=False, curvature=[]):
+def sample_from_model(model, nested_model, x_0, args, reverse=False):
     if args.method in ADAPTIVE_SOLVER:
         options = {
             "dtype": torch.float64,
@@ -71,25 +81,15 @@ def sample_from_model(model, x_0, args, reverse=False, curvature=[]):
     if not args.compute_fid:
         model.count_nfe = True
     model_ = Model_(model)
+    nested_model = Model_(nested_model)
     model_.eval()
-    temp = [0., 1.] if reverse else [1., 0.]
-    t = torch.tensor(temp, device="cuda")
+    nested_model.eval()
+    
     with torch.no_grad():
         if args.method == "heun":
             fake_image = heun(model_, x_0, args.step_size)
         else:
-            fake_image = euler_curvature(model_, x_0, args.step_size, curvature)
-            # fake_image = odeint(model_, 
-            #                     x_0, 
-            #                     t, 
-            #                     method=args.method, 
-            #                     atol = args.atol, 
-            #                     rtol = args.rtol,
-            #                     adjoint_method=args.method,
-            #                     adjoint_atol= args.atol,
-            #                     adjoint_rtol= args.rtol,
-            #                     options=options
-            #                     )
+            fake_image = euler(model_, nested_model, x_0, args)
     return fake_image
 
 
@@ -108,16 +108,25 @@ def sample_and_test(args):
     
     to_range_0_1 = lambda x: (x + 1.) / 2.
 
-    args.layout = False
     model =  get_flow_model(args).to(device)
-    ckpt = torch.load('./saved_info/flow_matching/{}/{}/model_{}.pth'.format(args.dataset, args.exp, args.epoch_id), map_location=device)
-    print("Finish loading model")
+    ckpt = torch.load(args.init_model, map_location=device)
+    print("Finish loading init model")
     #loading weights from ddp in single gpu
     for key in list(ckpt.keys()):
         ckpt[key[7:]] = ckpt.pop(key)
     model.load_state_dict(ckpt)
     model.eval()
-        
+    
+    nested_model =  get_flow_model(args).to(device)
+    nested_ckpt = torch.load(args.nest_model, map_location=device)
+    print("Finish loading nested model")
+    #loading weights from ddp in single gpu
+    for key in list(nested_ckpt.keys()):
+        nested_ckpt[key[7:]] = nested_ckpt.pop(key)
+    nested_model.load_state_dict(nested_ckpt)
+    nested_model.eval()
+    
+    
     iters_needed = 50000 //args.batch_size
     
     save_dir = "./generated_samples/{}".format(args.dataset)
@@ -126,7 +135,7 @@ def sample_and_test(args):
         os.makedirs(save_dir)
     
     if args.compute_fid:
-        for i in range(iters_needed):
+        for i in tqdm(range(iters_needed)):
             with torch.no_grad():
                 x_0 = torch.randn(args.batch_size, 3, args.image_size, args.image_size).to(device)
                 fake_sample = sample_from_model(model, x_0, args)[-1]
@@ -142,16 +151,11 @@ def sample_and_test(args):
         fid = calculate_fid_given_paths(paths=paths, **kwargs)
         print('FID = {}'.format(fid))
     else:
-        curvature = [0]*int(1/args.step_size)
-        for _ in tqdm(range(10)):
-            x_0 = torch.randn(args.batch_size, 3, args.image_size, args.image_size).to(device)
-            fake_sample = sample_from_model(model, x_0, args, curvature=curvature)[-1]
-            fake_sample = to_range_0_1(fake_sample)
-            # print("NFE: {}".format(model.nfe))
-            torchvision.utils.save_image(fake_sample, './samples_{}_{}_{}_{}_{}.jpg'.format(args.dataset, args.method, args.atol, args.rtol, model.nfe))
-        plt.plot(np.linspace(0, 1, len(curvature)-2), curvature[1:-1])
-        plt.savefig('plot_curvature.png')
-    
+        x_0 = torch.randn(args.batch_size, 3, args.image_size, args.image_size).to(device)
+        fake_sample = sample_from_model(model, nested_model, x_0, args)[-1]
+        fake_sample = to_range_0_1(fake_sample)
+        torchvision.utils.save_image(fake_sample, './samples_{}_{}_{}_{}_{}.jpg'.format(args.dataset, args.method, args.nfe_noise, args.nfe_middle, args.nfe_data))
+   
     
             
 
@@ -194,12 +198,29 @@ if __name__ == '__main__':
     parser.add_argument("--resblock_updown", type=bool, default=False)
     parser.add_argument("--use_new_attention_order", type=bool, default=False)
     
+    
+    ###nest
+    parser.add_argument('--t_noise', type=float, default=0.75,
+                            help='beta1 for adam')
+    parser.add_argument('--t_data', type=float, default=0.25,
+                            help='beta1 for adam')
+    parser.add_argument('--nfe_noise', type=int, default=5,
+                            help='beta1 for adam')
+    parser.add_argument('--nfe_middle', type=int, default=10,
+                            help='beta1 for adam')
+    parser.add_argument('--nfe_data', type=int, default=5,
+                            help='beta1 for adam')
+    parser.add_argument('--init_model', default='init model', help='name of experiment')
+    parser.add_argument('--nest_model', default='init model', help='name of experiment')
+    
+    
     #######################################
     parser.add_argument('--exp', default='experiment_cifar_default', help='name of experiment')
     parser.add_argument('--real_img_dir', default='./pytorch_fid/cifar10_train_stat.npy', help='directory to real images for FID computation')
     parser.add_argument('--dataset', default='cifar10', help='name of dataset')
     parser.add_argument('--num_timesteps', type=int, default=200)
     parser.add_argument('--batch_size', type=int, default=100, help='sample generating batch size')
+    
     
     # sampling argument
     parser.add_argument('--atol', type=float, default=1e-5, help='absolute tolerance error')
@@ -215,6 +236,3 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     sample_and_test(args)
-    
-   
-                

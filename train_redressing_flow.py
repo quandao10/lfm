@@ -6,6 +6,7 @@
 # ---------------------------------------------------------------
 
 import argparse
+from copy import deepcopy
 import torch
 import numpy as np
 from torchdiffeq import odeint_adjoint as odeint
@@ -148,8 +149,12 @@ def train(rank, gpu, args):
                                                pin_memory=True,
                                                sampler=train_sampler,
                                                drop_last = True)
-    args.perturb_rate = torch.tensor(args.perturb_rate, device=device)
+
     model = get_flow_model(args).to(device)
+    deep_model = deepcopy(model).to(device)
+    deep_model.eval()
+    for p in deep_model.parameters():
+        p.requires_grad_(False)
     broadcast_params(model.parameters())
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas = (args.beta1, args.beta2))
     
@@ -197,16 +202,20 @@ def train(rank, gpu, args):
        
         for iteration, (x_1, x_0) in enumerate(data_loader):
             x_1 = x_1.to(device, non_blocking=True)
-            noise = torch.randn_like(x_1)
-            x_1 = torch.sqrt(1-args.perturb_rate)*x_1 + torch.sqrt(args.perturb_rate)*noise
             x_0 = x_0.to(device, non_blocking=True)
             model.zero_grad()
+            
+            x_r1 = x_1 - (1-args.tau1) * deep_model(x_1, torch.ones((x_1.size(0),), device = device))
+            x_r0 = x_0 + args.tau0 * deep_model(x_0, torch.zeros((x_1.size(0),), device = device))
+            u = x_r1 - x_r0
+            x_r1 = x_r1 + (1-args.tau1) * u
+            x_r0 = x_r0 - args.tau0 * u
+            
             #sample t
             t = torch.rand((x_1.size(0),) , device=device)
             t = t.view(-1, 1, 1, 1)
             v_t = t * x_1 + (1-t) * x_0
             out = model(t.squeeze(), v_t)
-            u = x_1 - x_0
             loss = F.mse_loss(out, u)
             loss.backward()
             optimizer.step()
@@ -340,6 +349,9 @@ if __name__ == '__main__':
                         help='Coupling model to generate the couplings')
     parser.add_argument('--keep_training', type=bool, default=True,
                         help='Option wheather to train a model based on generated coupling dataset')
+    parser.add_argument('--tau_1', type=float, default=0.1)
+    parser.add_argument('--tau_0', type=float, default=0.9)
+    
     
     # sampling argument
     parser.add_argument('--atol', type=float, default=1e-5, help='absolute tolerance error')

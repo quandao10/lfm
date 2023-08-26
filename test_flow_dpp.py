@@ -34,7 +34,8 @@ class Model_(nn.Module):
         self.model = model
 
     def forward(self, t, x_0):
-        return self.model(t, x_0)
+        out = self.model(t, x_0)
+        return -out[:,:3,:,:] + out[:,3:,:,:]
 
 
 def sample_from_model(model, x_1, nfe):
@@ -45,17 +46,17 @@ def sample_from_model(model, x_1, nfe):
 
 
 def main(args):
-    torch.backends.cuda.matmul.allow_tf32 = True  # True: fast but may lead to some small numerical differences
-    torch.set_grad_enabled(False)
+    # torch.backends.cuda.matmul.allow_tf32 = False  # True: fast but may lead to some small numerical differences
+    # torch.set_grad_enabled(False)
     # Setup DDP:
     dist.init_process_group("nccl")
     rank = dist.get_rank()
     device = rank % torch.cuda.device_count()
 
-    seed = args.seed + rank
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    seed = args.seed
+    torch.manual_seed(seed + rank)
+    torch.cuda.manual_seed(seed + rank)
+    torch.cuda.manual_seed_all(seed + rank)
     torch.cuda.set_device(device)
     print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
@@ -171,7 +172,7 @@ if __name__ == '__main__':
                             help='size of image')
     parser.add_argument('--num_in_channels', type=int, default=3,
                             help='in channel image')
-    parser.add_argument('--num_out_channels', type=int, default=3,
+    parser.add_argument('--num_out_channels', type=int, default=6,
                             help='in channel image')
     parser.add_argument('--nf', type=int, default=256,
                             help='channel of image')
@@ -182,7 +183,7 @@ if __name__ == '__main__':
     parser.add_argument("--resamp_with_conv", type=bool, default=True)
     parser.add_argument('--num_res_blocks', type=int, default=2,
                             help='number of resnet blocks per scale')
-    parser.add_argument('--num_heads', type=int, default=4,
+    parser.add_argument('--num_heads', type=int, default=8,
                             help='number of head')
     parser.add_argument('--num_head_upsample', type=int, default=-1,
                             help='number of head upsample')
