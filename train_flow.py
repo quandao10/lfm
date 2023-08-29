@@ -116,7 +116,7 @@ def train(rank, gpu, args):
             x_0 = x.to(device, non_blocking=True)
             model.zero_grad()
             #sample t
-            t = torch.rand((x_1.size(0),) , device=device)
+            t = torch.rand((x_0.size(0),) , device=device)
             t = t.view(-1, 1, 1, 1)
             x_1 = torch.randn_like(x_0)
             v_t = (1 - t) * x_1 + t * x_0

@@ -205,16 +205,16 @@ def train(rank, gpu, args):
             x_0 = x_0.to(device, non_blocking=True)
             model.zero_grad()
             
-            x_r1 = x_1 - (1-args.tau1) * deep_model(x_1, torch.ones((x_1.size(0),), device = device))
-            x_r0 = x_0 + args.tau0 * deep_model(x_0, torch.zeros((x_1.size(0),), device = device))
+            x_r1 = x_1 - (1-args.tau1) * deep_model(torch.ones((x_1.size(0),), device = device), x_1)
+            x_r0 = x_0 + args.tau0 * deep_model(torch.zeros((x_1.size(0),), device = device), x_0)
             u = x_r1 - x_r0
             x_r1 = x_r1 + (1-args.tau1) * u
             x_r0 = x_r0 - args.tau0 * u
             
             #sample t
-            t = torch.rand((x_1.size(0),) , device=device)
+            t = args.tau0+(args.tau1-args.tau0)*torch.rand((x_1.size(0),) , device=device)
             t = t.view(-1, 1, 1, 1)
-            v_t = t * x_1 + (1-t) * x_0
+            v_t = t * x_r1 + (1-t) * x_r0
             out = model(t.squeeze(), v_t)
             loss = F.mse_loss(out, u)
             loss.backward()
@@ -349,8 +349,8 @@ if __name__ == '__main__':
                         help='Coupling model to generate the couplings')
     parser.add_argument('--keep_training', type=bool, default=True,
                         help='Option wheather to train a model based on generated coupling dataset')
-    parser.add_argument('--tau_1', type=float, default=0.1)
-    parser.add_argument('--tau_0', type=float, default=0.9)
+    parser.add_argument('--tau1', type=float, default=0.9)
+    parser.add_argument('--tau0', type=float, default=0.1)
     
     
     # sampling argument
