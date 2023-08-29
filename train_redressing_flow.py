@@ -207,7 +207,7 @@ def train(rank, gpu, args):
             
             x_r1 = x_1 - (1-args.tau1) * deep_model(torch.ones((x_1.size(0),), device = device), x_1)
             x_r0 = x_0 + args.tau0 * deep_model(torch.zeros((x_1.size(0),), device = device), x_0)
-            u = x_r1 - x_r0
+            u = (x_r1 - x_r0)/(args.tau1 - args.tau0)
             x_r1 = x_r1 + (1-args.tau1) * u
             x_r0 = x_r0 - args.tau0 * u
             
