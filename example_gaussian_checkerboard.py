@@ -8,7 +8,6 @@ import sklearn
 import sklearn.datasets
 import torch
 import torch.nn as nn
-from sklearn.datasets import make_checkerboard
 from sklearn.utils import shuffle as util_shuffle
 from torch import Tensor
 from torch.distributions import Normal
@@ -176,9 +175,9 @@ class CNF(nn.Module):
         return odeint(self, x, 0.0, 1.0, phi=self.parameters())
 
     # backward pass from Gaussian to data
-    def decode(self, z: Tensor, nfe=5) -> Tensor:
-        t = torch.tensor([1., 0.])
-        return odeint(self, z, t, method="euler", options={"step_size": 1./nfe,})[-1]
+    def decode(self, z: Tensor, t=torch.tensor([1., 0.]), method='euler', options={}) -> Tensor:
+        # return odeint(self, z, t, method="euler", options={"step_size": 1./nfe,})[-1]
+        return odeint(self, z, t, method=method, options=options)[-1]
 
     def log_prob(self, x: Tensor) -> Tensor:
         I = torch.eye(x.shape[-1]).to(x)
@@ -205,28 +204,47 @@ class FlowMatchingLoss(nn.Module):
         return (self.v(t.squeeze(-1), xt) - u).square().mean()
 
 
-# Training with all data
+# Training data
 # we want to learn flow from x0 to x1
+torch.manual_seed(1)
 n_samples = 2000
 data = torch.from_numpy(inf_train_gen('checkerboard', n_samples)).float()
 # target = torch.from_numpy(inf_train_gen('2spirals', n_samples)).float()
 target = torch.randn_like(data)
 
-batch_size = 128
+batch_size = 64
 n_iters = n_samples // batch_size
-n_epochs = 1000
+n_epochs = 4000
 
-
-# Training minibatch
+### Training with all data
 flow = CNF(2, hidden_features=[256] * 3)
+
+# Training
 loss = FlowMatchingLoss(flow)
 optimizer = torch.optim.AdamW(flow.parameters(), lr=1e-3)
 
 temp = time()
 losses = []
+for epoch in tqdm(range(n_epochs), ncols=88):
+    # we can make it batch training for replacing len(data) with something smaller
+    optimizer.zero_grad()
+    loss(data, target).backward()
+    losses.append(loss(data, target).item())
+    optimizer.step()
+
+print(f'\nTotal training time: {time()- temp}');
+plt.plot(losses);  # should have small variances
+
+### Training with minibatch
+flow_minibatch = CNF(2, hidden_features=[256] * 3)
+loss = FlowMatchingLoss(flow_minibatch)
+optimizer = torch.optim.AdamW(flow_minibatch.parameters(), lr=1e-3)
+
+temp = time()
+losses = []
 
 for epoch in tqdm(range(n_epochs), ncols=88):
-    subset = torch.randint(0, n_samples, (batch_size * n_iters,))
+    subset = torch.randint(0, len(data), (batch_size * n_iters,))
     for i in range(n_iters):
         batch_data = data[subset[i * batch_size:(i+1)*batch_size]]
         batch_target = target[subset[i * batch_size:(i+1)*batch_size]]
@@ -236,34 +254,22 @@ for epoch in tqdm(range(n_epochs), ncols=88):
         optimizer.step()
 
 print(f'\nTotal training time: {time()- temp}');
-
-print(f'\nTotal training time: {time()- temp}');
-print(f'Standard Error of Training loss: {np.std(losses)}');
-plt.plot(losses)
-plt.show()
-
-# Sample push-forward
-with torch.no_grad():
-    x = flow.decode(target, nfe=5).numpy()
-
-plt.figure()
-plt.scatter(data[:, 0], data[:, 1], color='C0', alpha=0.5, label='Samples')
-plt.scatter(x[:, 0], x[:, 1], color='C1', alpha=0.5, label='Generated')
-plt.legend()
-plt.show()
+print(f'Standard Error of Training loss: {np.std(losses)}')
+plt.plot(losses);
 
 
-# Training with minibatch
+##%
 # Multisample flow matching training (batchOT in Pooladian et al 2023)
 flow_minibatch_ot = CNF(2, hidden_features=[256] * 3)
+
 loss = FlowMatchingLoss(flow_minibatch_ot)
 optimizer = torch.optim.AdamW(flow_minibatch_ot.parameters(), lr=1e-3)
 
 temp = time()
 losses = []
 for epoch in tqdm(range(n_epochs), ncols=88):
-    # Minibatch OT
     subset = torch.randint(0, len(data), (batch_size * n_iters,))
+    # Minibatch OT
     for i in range(n_iters):
         batch_target = target[subset[i * batch_size:(i+1)*batch_size]]
         batch_data = data[subset[i * batch_size:(i+1)*batch_size]]
@@ -275,31 +281,45 @@ for epoch in tqdm(range(n_epochs), ncols=88):
 
         # with OT plan we can define which noise matched with which minibatch sample
         match_indices = torch.where(Pi != 0)[1]
-        sorted_batch_target = batch_target[torch.sort(match_indices)[1]]
+        sorted_batch_noise = batch_target[torch.sort(match_indices)[1]]
 
         optimizer.zero_grad()
-        loss(batch_data, batch_noise).backward()
+        loss(batch_data, batch_target).backward()
         losses.append(loss(batch_data, sorted_batch_noise).item())
         optimizer.step()
 
 print(f'\nTotal training time: {time()- temp}');
 print(f'Standard Error of Training loss: {np.std(losses)}');
-pl.plot(losses);
+plt.plot(losses);
 
 
+content_flow = {'epoch': epoch + 1, 'model_dict': flow.state_dict()}
+content_flow_minibatch = {'epoch': epoch + 1, 'model_dict': flow_minibatch.state_dict()}
+content_flow_minibatch_ot = {'epoch': epoch + 1, 'model_dict': flow_minibatch_ot.state_dict()}
+
+torch.save(content_flow, f'./saved_info/flow_content_{n_epochs}.pth')
+torch.save(content_flow_minibatch, f'./saved_info/flow_minibatch_content_{n_epochs}.pth')
+torch.save(content_flow_minibatch_ot, f'./saved_info/flow_minibatch_ot_content_{n_epochs}.pth')
 
 # Sampling
-nfe = 100
-with torch.no_grad():
-    x_ot = flow_minibatch_ot.decode(target, nfe=nfe).numpy()
-    x = flow.decode(target, nfe=nfe).numpy()
 
-nrows, ncols = 1, 3
-fig, ax = plt.subplots(nrows, ncols, figsize=(8, 3))
-ax[0].scatter(data[:, 0], data[:, 1], color='C0', alpha=0.5)
-ax[0].set_title('Data')
-ax[1].scatter(x[:, 0], x[:, 1], color='C1', alpha=0.5)
-ax[1].set_title(f'Vanila Minibatch, nfe={nfe}')
-ax[2].scatter(x_ot[:, 0], x_ot[:, 1], color='C2', alpha=0.5)
-ax[2].set_title(f'OT Minibatch, nfe={nfe}')
-fig.show()
+for nfe in [2, 4, 8, 10, 20, 100]:
+    method = 'euler'
+    options = {'step_size': 1./nfe}
+    t = torch.tensor([1.0, 0.1])
+    with torch.no_grad():
+        x = flow.decode(target, t=t, method=method, options=options).numpy()
+        x_ot = flow_minibatch_ot.decode(target, t=t, method=method, options=options).numpy()
+        x_batch = flow_minibatch.decode(target, t=t, method=method, options=options).numpy()
+
+    nrows, ncols = 1, 4
+    fig, ax = plt.subplots(nrows, ncols, figsize=(15, 3))
+    ax[0].scatter(data[:, 0], data[:, 1], color='C0', alpha=0.5)
+    ax[0].set_title('Data')
+    ax[1].scatter(x[:, 0], x[:, 1], color='C1', alpha=0.5)
+    ax[1].set_title('Full dataset')
+    ax[2].scatter(x_batch[:, 0], x_batch[:, 1], color='C2', alpha=0.5)
+    ax[2].set_title(f'Vanila Minibatch, nfe={nfe}')
+    ax[3].scatter(x_ot[:, 0], x_ot[:, 1], color='C3', alpha=0.5)
+    ax[3].set_title(f'OT Minibatch, nfe={nfe}')
+    fig.savefig(f'./saved_info/checkerboard_samples_nfe={nfe}.pdf')
