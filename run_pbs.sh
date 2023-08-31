@@ -15,16 +15,17 @@ cd $HOME/scratch/work/lfm
 set -x
 set -e
 
-	       
+
 CUDA_VISIBLE_DEVICES=0 python train_redressing_flow.py \
 		       --exp experiment_cifar_redressing \
 		       --dataset cifar10 \
-		       --minibatch_ot 0 \
+		       --coupling_model '../diff-flow-matching/saved_info/flow_matching/cifar10/experiment_cifar_default/model_500.pth'
+		       #--minibatch_ot 0 \
 		       --batch_size 128 \
 		       --num_epoch 600 \
 		       --image_size 32 \
 		       --num_channels 256 \
-		       --attn_resolution (8,) \
+		       --attn_resolution 8 \
 		       --num_res_blocks 2 \
 		       --lr 1e-4 \
 		       --num_process_per_node 1 \
