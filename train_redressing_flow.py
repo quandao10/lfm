@@ -43,15 +43,23 @@ def broadcast_params(params):
         dist.broadcast(param.data, src=0)
 
 
-def sample_from_model(model, x_0, nfes=[1, 5, 10, 25, 50, 100]):
-    t = torch.tensor([1., 0.], device="cuda")
-    model_ = Model_(model)
-
+def sample_from_model(model, model_old, tau0, tau1, x_0, nfes = [1, 5, 10, 25, 50, 100]):
+    t0 = torch.tensor([1., tau1], device="cuda")
+    t1 = torch.tensor([tau1, tau0], device="cuda")
+    t2 = torch.tensor([tau0, 0.], device="cuda")
+    
     fake_images = {
     }
     for nfe in nfes:
-        fake_image = odeint(model_, x_0, t, method="euler",
-                            options={"step_size": 1./nfe, })[-1]
+        fake_image = odeint(model_old, x_0, t0, method="euler", options = {
+                "step_size": 1./nfe,
+            })[-1]
+        fake_image = odeint(model, fake_image, t1, method="euler", options = {
+                "step_size": 1./nfe,
+            })[-1]
+        fake_image = odeint(model_old, fake_image, t2, method="euler", options = {
+                "step_size": 1./nfe,
+            })[-1]        
         fake_images[nfe] = fake_image
     return fake_images
 
@@ -169,10 +177,6 @@ def train(rank, gpu, args):
     )
 
     model = get_flow_model(args).to(device)
-    deep_model = deepcopy(model).to(device)
-    deep_model.eval()
-    for p in deep_model.parameters():
-        p.requires_grad_(False)
     broadcast_params(model.parameters())
     optimizer = optim.Adam(model.parameters(), lr=args.lr,
                            betas=(args.beta1, args.beta2))
@@ -216,6 +220,10 @@ def train(rank, gpu, args):
         # for key in list(ckpt.keys()):
         #     ckpt[key[7:]] = ckpt.pop(key)
         model.load_state_dict(ckpt)
+        deep_model = deepcopy(model).to(device)
+        deep_model.eval()
+        for p in deep_model.parameters():
+            p.requires_grad_(False)
         epoch, init_epoch = 0, 0
         del ckpt
 
@@ -255,7 +263,7 @@ def train(rank, gpu, args):
 
         if rank == 0:
             rand = torch.randn_like(x_1)[:16]
-            fake_samples = sample_from_model(model, rand)
+            fake_samples = sample_from_model(model, deep_model, args.tau0, args.tau1, rand)
             for nfe in fake_samples.keys():
                 torchvision.utils.save_image(
                     fake_samples[nfe],
