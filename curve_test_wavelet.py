@@ -16,6 +16,8 @@ from pytorch_fid.fid_score import calculate_fid_given_paths
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
+from copy import deepcopy
+from DWT_IDWT.DWT_IDWT_layer import IDWT_1D, DWT_1D
 
 ADAPTIVE_SOLVER = ["dopri5", "dopri8", "adaptive_heun", "bosh3"]
 FIXER_SOLVER = ["euler", "rk4", "midpoint", "heun"]
@@ -32,20 +34,19 @@ def heun(model, noise, dt):
         x_t = x_t - v_t * dt
     return (noise, x_t)
 
-def euler_curvature(model, noise, dt, curvature):
-    N = int(1/dt)
-    M = noise.shape[0]
+def euler_curvature(model, noise, nfe):
+    N = nfe
+    dt = 1./nfe
     x_t = noise
-    v_temp = None
+    series = [x_t]
+    pred_series = []
     for i in range(N):
         v_t = model(torch.tensor((N-i)/N), x_t)
+        pred_series.append(x_t - v_t * torch.tensor((N-i)/N))
         x_t = x_t - v_t * dt
-        if v_temp != None:
-            # sub = (v_t-v_temp).reshape(noise.shape[0], -1)
-            # curvature[i-1] += torch.mean(torch.norm(sub, dim=1, p=2)).to("cpu")
-            curvature[i-1] = 1 - torch.mean(F.cosine_similarity(v_t.reshape(M, -1), v_temp.reshape(M, -1), dim=1)).to("cpu")
-        v_temp = v_t
-    return (noise, x_t)
+        series.append(x_t)
+        
+    return torch.stack(series), torch.stack(pred_series)
 
 
 class Model_(nn.Module):
@@ -55,49 +56,36 @@ class Model_(nn.Module):
 
     def forward(self, t, x_0):
         out = self.model(t, x_0)
-        # return -out[:,:3,:,:] + out[:,3:,:,:]
         return out
     
-def sample_from_model(model, x_0, args, reverse=False, curvature=[]):
-    if args.method in ADAPTIVE_SOLVER:
-        options = {
-            "dtype": torch.float64,
-        }
-    else:
-        options = {
-            "step_size": args.step_size,
-            "perturb": args.perturb
-        }
-    if not args.compute_fid:
-        model.count_nfe = True
+def sample_from_model(model, x_0, args):
+    
     model_ = Model_(model)
     model_.eval()
-    temp = [0., 1.] if reverse else [1., 0.]
-    t = torch.tensor(temp, device="cuda")
-    with torch.no_grad():
-        if args.method == "heun":
-            fake_image = heun(model_, x_0, args.step_size)
-        else:
-            fake_image = euler_curvature(model_, x_0, args.step_size, curvature)
-    return fake_image
+    with torch.no_grad():        
+        fake_image, pred_series = euler_curvature(model_, x_0, args.nfe)
+    return fake_image, pred_series
+
+def analyze_wavelet(series):
+    # t b c h w
+    dwt = DWT_1D("haar")
+    t, b, c, h, w = series.size()
+    series = torch.permute(series, (1,2,3,4,0)).reshape(b,-1,t)
+    low, high = dwt(series)
+    
+    high_image, low_image = high.reshape(b, c, h, w, t//2), low.reshape(b, c, h, w, t//2)
+    high_image, low_image = torch.permute(high_image, (4, 0, 1, 2, 3)), torch.permute(low_image, (4, 0, 1, 2, 3))
+    for i in range(b):  
+        torchvision.utils.save_image(high_image[:, i, :, :, :], "high_{}.png".format(i), nrow=10, normalize=True)
+        torchvision.utils.save_image(low_image[:, i, :, :, :], "low_{}.png".format(i), nrow=10, normalize=True)
 
 
 def sample_and_test(args):
-    torch.manual_seed(42)
+    torch.manual_seed(43)
     device = 'cuda:0'
-    
-    if args.dataset == 'cifar10':
-        real_img_dir = 'pytorch_fid/cifar10_train_stat.npy'
-    elif args.dataset == 'celeba_256':
-        real_img_dir = 'pytorch_fid/celeba_256_stat.npy'
-    elif args.dataset == 'lsun':
-        real_img_dir = 'pytorch_fid/lsun_church_stat.npy'
-    else:
-        real_img_dir = args.real_img_dir
     
     to_range_0_1 = lambda x: (x + 1.) / 2.
 
-    args.layout = False
     model =  get_flow_model(args).to(device)
     ckpt = torch.load('./saved_info/flow_matching/{}/{}/model_{}.pth'.format(args.dataset, args.exp, args.epoch_id), map_location=device)
     print("Finish loading model")
@@ -106,39 +94,40 @@ def sample_and_test(args):
         ckpt[key[7:]] = ckpt.pop(key)
     model.load_state_dict(ckpt)
     model.eval()
+    
+    x_0 = torch.randn(args.batch_size, 3, args.image_size, args.image_size).to(device)
+    
+    fake_sample, pred_series = sample_from_model(model, x_0, args)
+    fake_sample, pred_series = to_range_0_1(fake_sample), to_range_0_1(pred_series)
+    
+    analyze_wavelet(pred_series)
+    
+    # for i in range(x_0.size(0)):  
+    #     torchvision.utils.save_image(fake_sample[:, i, :, :, :], "series_{}.png".format(i), nrow=10)
+    #     torchvision.utils.save_image(pred_series[:, i, :, :, :], "pred_series_{}.png".format(i), nrow=10)
         
-    iters_needed = 50000 //args.batch_size
+    # residual_pred = -pred_series[:-1] + pred_series[1:]
     
-    save_dir = "./generated_samples/{}".format(args.dataset)
+    # norm_residual = residual_pred**2
+    # norm_residual = torch.sqrt(torch.sum(norm_residual, dim=[2,3,4]))
+    # norm_residual = torch.mean(norm_residual, dim = 1)
     
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
+    # residual_pred = torch.mean(residual_pred, dim = 1)
+    # double_residual_pred = residual_pred[1:] - residual_pred[:-1]
+    # torchvision.utils.save_image(residual_pred, "pred_residual.png", nrow=10, normalize=True)
+    # torchvision.utils.save_image(double_residual_pred, "double_pred_residual.png", nrow=10, normalize=True)
+    # residual_pred = torch.mean(residual_pred, dim = [1,2,3])
+    # double_residual_pred = torch.mean(double_residual_pred, dim = [1,2,3])
+    # plt.figure()
+    # plt.plot(np.linspace(0, 1, residual_pred.size(0)), residual_pred.to("cpu"))
+    # plt.savefig('plot_residual.png')
+    # plt.figure()
+    # plt.plot(np.linspace(0, 1, double_residual_pred.size(0)), double_residual_pred.to("cpu"))
+    # plt.savefig('double_plot_residual.png')
+    # plt.figure()
+    # plt.plot(np.linspace(0, 1, norm_residual.size(0)), norm_residual.to("cpu"))
+    # plt.savefig('norm_residual.png')
     
-    if args.compute_fid:
-        for i in range(iters_needed):
-            with torch.no_grad():
-                x_0 = torch.randn(args.batch_size, 3, args.image_size, args.image_size).to(device)
-                fake_sample = sample_from_model(model, x_0, args)[-1]
-                fake_sample = to_range_0_1(fake_sample)
-                for j, x in enumerate(fake_sample):
-                    index = i * args.batch_size + j 
-                    torchvision.utils.save_image(x, './generated_samples/{}/{}.jpg'.format(args.dataset, index))
-                print('generating batch ', i)
-        
-        paths = [save_dir, real_img_dir]
-    
-        kwargs = {'batch_size': 200, 'device': device, 'dims': 2048}
-        fid = calculate_fid_given_paths(paths=paths, **kwargs)
-        print('FID = {}'.format(fid))
-    else:
-        curvature = [0]*int(1/args.step_size)
-        for _ in tqdm(range(10)):
-            x_0 = torch.randn(args.batch_size, 3, args.image_size, args.image_size).to(device)
-            fake_sample = sample_from_model(model, x_0, args, curvature=curvature)[-1]
-            fake_sample = to_range_0_1(fake_sample)
-            torchvision.utils.save_image(fake_sample, './samples_{}_{}_{}_{}_{}.jpg'.format(args.dataset, args.method, args.atol, args.rtol, model.nfe))
-        plt.plot(np.linspace(0, 1, len(curvature)-2), curvature[1:-1])
-        plt.savefig('plot_curvature.png')
     
     
             
@@ -186,8 +175,8 @@ if __name__ == '__main__':
     parser.add_argument('--exp', default='experiment_cifar_default', help='name of experiment')
     parser.add_argument('--real_img_dir', default='./pytorch_fid/cifar10_train_stat.npy', help='directory to real images for FID computation')
     parser.add_argument('--dataset', default='cifar10', help='name of dataset')
-    parser.add_argument('--num_timesteps', type=int, default=200)
-    parser.add_argument('--batch_size', type=int, default=100, help='sample generating batch size')
+    parser.add_argument('--nfe', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=2, help='sample generating batch size')
     
     # sampling argument
     parser.add_argument('--atol', type=float, default=1e-5, help='absolute tolerance error')
@@ -203,6 +192,3 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     sample_and_test(args)
-    
-   
-                
