@@ -20,6 +20,9 @@ import lpips
 from torch.multiprocessing import Process
 import torch.distributed as dist
 import shutil
+from tqdm import tqdm
+from torch.autograd.functional import jacobian, jvp
+
 
 class Model_(nn.Module):
     def __init__(self, model):
@@ -28,7 +31,8 @@ class Model_(nn.Module):
 
     def forward(self, t, x_0):
         out = self.model(t, x_0)
-        return -out[:,:3,:,:] + out[:,3:,:,:]
+        return out
+        # return -out[:,:3,:,:] + out[:,3:,:,:]
 
 def copy_source(file, output_dir):
     shutil.copyfile(file, os.path.join(output_dir, os.path.basename(file)))
@@ -83,7 +87,7 @@ def train(rank, gpu, args):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.num_epoch, eta_min=1e-5)
 
     #ddp
-    model = nn.parallel.DistributedDataParallel(model, device_ids=[gpu],find_unused_parameters=True)
+    model = nn.parallel.DistributedDataParallel(model, device_ids=[gpu],find_unused_parameters=False)
 
     exp = args.exp
     parent_dir = "./saved_info/flow_matching/{}".format(args.dataset)
@@ -107,12 +111,15 @@ def train(rank, gpu, args):
                   .format(checkpoint['epoch']))
     else:
         global_step, epoch, init_epoch = 0, 0, 0
+        # ckpt = torch.load('./saved_info/flow_matching/{}/ckpt/model_{}.pth'.format(args.dataset, 700), map_location=device)
+        # print("Finish loading model")
+        # model.load_state_dict(ckpt)
 
 
     for epoch in range(init_epoch, args.num_epoch+1):
         train_sampler.set_epoch(epoch)
 
-        for iteration, (x, y) in enumerate(data_loader):
+        for iteration, (x, y) in enumerate(tqdm(data_loader)):
             x_0 = x.to(device, non_blocking=True)
             model.zero_grad()
             #sample t
@@ -120,14 +127,16 @@ def train(rank, gpu, args):
             t = t.view(-1, 1, 1, 1)
             x_1 = torch.randn_like(x_0)
             v_t = (1 - t) * x_1 + t * x_0
-            out = model(t.squeeze(), v_t)
-            loss = F.mse_loss(out, x_1 - x_0)
+            out, jacobian_penalty = jvp(lambda x: model(t.squeeze(), x), v_t, v = torch.randn_like(v_t), create_graph=True)
+            penalty = torch.mean(out**2, dim=[0,1,2,3])
+            jacobian_penalty = torch.mean(torch.mean(jacobian_penalty**2, dim=[1,2,3]), dim=0)
+            loss = F.mse_loss(out, x_1 - x_0) + penalty * 1e-5 + jacobian_penalty * 0.1
             loss.backward()
             optimizer.step()
 
-            if iteration % 100 == 0:
+            if iteration % 50 == 0:
                 if rank == 0:
-                    print('epoch {} iteration{}, Loss: {}'.format(epoch,iteration, loss.item()))
+                    print('epoch {} iteration{}, Loss: {}, Penalty: {}, Jab: {}'.format(epoch,iteration, loss.item(), penalty.item(), jacobian_penalty.item()))
 
         if not args.no_lr_decay:
             scheduler.step()
@@ -161,7 +170,7 @@ def train(rank, gpu, args):
 def init_processes(rank, size, fn, args):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = args.master_address
-    os.environ['MASTER_PORT'] = '6021'
+    os.environ['MASTER_PORT'] = '6022'
     torch.cuda.set_device(args.local_rank)
     gpu = args.local_rank
     dist.init_process_group(backend='nccl', init_method='env://', rank=rank, world_size=size)
@@ -183,7 +192,7 @@ if __name__ == '__main__':
                             help='size of image')
     parser.add_argument('--num_in_channels', type=int, default=3,
                             help='in channel image')
-    parser.add_argument('--num_out_channels', type=int, default=6,
+    parser.add_argument('--num_out_channels', type=int, default=3,
                             help='in channel image')
     parser.add_argument('--nf', type=int, default=256,
                             help='channel of image')

@@ -53,9 +53,9 @@ def euler_curvature(model, noise, nfe):
     pred_series = []
     kinetic_energy = []
     jacob_energy = []
-    model_grad = Model_grad(model)
-    for p in model_grad.parameters():
-        p.requires_grad = True
+    # model_grad = Model_grad(model)
+    # for p in model_grad.parameters():
+    #     p.requires_grad = True
     
     for i in tqdm(range(N)):
         v_t = model(torch.tensor((N-i)/N), x_t)
@@ -75,6 +75,31 @@ def euler_curvature(model, noise, nfe):
         
     return torch.stack(series), torch.stack(pred_series), torch.stack(kinetic_energy), torch.stack(jacob_energy)
 
+def euler_curvature_2(model, noise, nfe):
+    N = nfe
+    dt = 1./nfe
+    
+    st_series = []
+    pred_st_series = []
+    first_step = torch.linspace(0, 0.3, steps=10)[1:]
+    for st_step in first_step:
+        x_t = noise
+        series = [x_t]
+        v_t = model(torch.tensor(1.0), x_t)
+        pred_series = [x_t - v_t * torch.tensor(1.)]
+        x_t = x_t - v_t * st_step
+        series.append(x_t)
+        for i in tqdm(range(int(st_step * nfe) + 1, N)):
+            v_t = model(torch.tensor((N-i)/N), x_t)
+            pred_series.append(x_t - v_t * torch.tensor((N-i)/N))
+            x_t = x_t - v_t * dt
+            series.append(x_t)
+        series, pred_series = torch.stack(series), torch.stack(pred_series)
+        st_series.append(series)
+        pred_st_series.append(pred_series)
+        
+    return st_series, pred_st_series
+
 
 class Model_(nn.Module):
     def __init__(self, model):
@@ -84,18 +109,23 @@ class Model_(nn.Module):
     def forward(self, t, x_0):
         out = self.model(t, x_0)
         return out
+        # return -out[:,:3,:,:] + out[:,3:,:,:]
     
-def sample_from_model(model, x_0, args):
+def sample_from_model(model, x_0, args, flag = False):
     
     model_ = Model_(model)
     model_.eval()
-    with torch.no_grad():        
-        fake_image, pred_series, kinetic_energy, jacob_energy = euler_curvature(model_, x_0, args.nfe)
-    return fake_image, pred_series, kinetic_energy, jacob_energy
+    with torch.no_grad():
+        if flag:
+            st_series, pred_st_series = euler_curvature_2(model_, x_0, args.nfe)
+            return st_series, pred_st_series
+        else:
+            fake_image, pred_series, kinetic_energy, jacob_energy = euler_curvature(model_, x_0, args.nfe)
+            return fake_image, pred_series, kinetic_energy, jacob_energy
 
 
 def sample_and_test(args):
-    torch.manual_seed(43)
+    torch.manual_seed(100)
     device = 'cuda:0'
     
     to_range_0_1 = lambda x: (x + 1.) / 2.
@@ -111,21 +141,31 @@ def sample_and_test(args):
     
     x_0 = torch.randn(args.batch_size, 3, args.image_size, args.image_size).to(device)
     
+    # st_series, pred_st_series = sample_from_model(model, x_0, args, flag=True)
+    
     fake_sample, pred_series, kinetic_series, jacob_energy = sample_from_model(model, x_0, args)
     fake_sample, pred_series = to_range_0_1(fake_sample), to_range_0_1(pred_series)
     
-    jacob_energy = torch.mean(torch.sum(jacob_energy**2, dim=[2,3,4]), dim=1)
-    kinetic_series = torch.mean(torch.sum(kinetic_series**2, dim=[2,3,4]), dim=1)
+    jacob_energy = torch.mean(torch.sum(jacob_energy**2, dim=[2,3,4]), dim=1)[:-20]
+    kinetic_series = torch.mean(kinetic_series**2, dim=[1,2,3,4])
+    # kinetic_series = torch.mean(kinetic_series**2, dim=[2,3,4])
     plt.figure()
+    # for i in range(kinetic_series.size(1)):
+    #     plt.plot(np.linspace(0, 1, kinetic_series.size(0)), kinetic_series[:,i].to("cpu"), label = i)
     plt.plot(np.linspace(0, 1, kinetic_series.size(0)), kinetic_series.to("cpu"))
+    plt.legend()
     plt.savefig('kinetic_energy.png')
     plt.figure()
-    plt.plot(np.linspace(0, 1, jacob_energy.size(0)), jacob_energy.to("cpu"))
+    plt.plot(np.linspace(0, 0.8, jacob_energy.size(0)), jacob_energy.to("cpu"))
     plt.savefig('jacob_energy.png')
     
-    # for i in range(x_0.size(0)):  
-    #     torchvision.utils.save_image(fake_sample[:, i, :, :, :], "series_{}.png".format(i), nrow=10)
-    #     torchvision.utils.save_image(pred_series[:, i, :, :, :], "pred_series_{}.png".format(i), nrow=10)
+    # for idx in range(len(st_series)):
+    #     fake_sample = st_series[idx]
+    #     pred_series = pred_st_series[idx]
+    #     fake_sample, pred_series = to_range_0_1(fake_sample), to_range_0_1(pred_series)
+    #     for i in range(x_0.size(0)):  
+    #         torchvision.utils.save_image(fake_sample[:, i, :, :, :], "series_flag_{}_{}.png".format(i, idx), nrow=10)
+    #         torchvision.utils.save_image(pred_series[:, i, :, :, :], "pred_series_flag_{}_{}.png".format(i, idx), nrow=10)
         
     # residual_pred = -pred_series[:-1] + pred_series[1:]
     
